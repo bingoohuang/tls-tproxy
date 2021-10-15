@@ -7,18 +7,18 @@ type Plugin interface {
 	Init() error
 }
 
+var registeredPlugins []Plugin
+
+func Register(plugin Plugin) {
+	registeredPlugins = append(registeredPlugins, plugin)
+}
+
+func List() []Plugin {
+	return registeredPlugins
+}
+
 type CertChecker func(hostnames []string, cert *x509.Certificate) error
 
 type CertCheckerPlugin interface {
 	GetCertChecker() CertChecker
-}
-
-var _REGISTERED_PLUGINS []Plugin
-
-func Register(plugin Plugin) {
-	_REGISTERED_PLUGINS = append(_REGISTERED_PLUGINS, plugin)
-}
-
-func List() []Plugin {
-	return _REGISTERED_PLUGINS
 }

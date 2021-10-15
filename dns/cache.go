@@ -14,19 +14,21 @@ type reverseCacheEntry struct {
 	values []aliasEntry
 }
 
-type DnsCache struct {
+type nameCache map[string]*reverseCacheEntry
+
+type Cache struct {
 	mutex            sync.RWMutex
-	reverseNameCache map[string]*reverseCacheEntry
+	reverseNameCache nameCache
 }
 
-func NewDnsCache() *DnsCache {
-	return &DnsCache{
+func NewCache() *Cache {
+	return &Cache{
 		mutex:            sync.RWMutex{},
-		reverseNameCache: make(map[string]*reverseCacheEntry),
+		reverseNameCache: make(nameCache),
 	}
 }
 
-func (c *DnsCache) GetAliasesForName(name string) []string {
+func (c *Cache) GetAliases(name string) []string {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
@@ -34,8 +36,8 @@ func (c *DnsCache) GetAliasesForName(name string) []string {
 	if !ok {
 		return nil
 	}
-	now := time.Now()
 
+	now := time.Now()
 	aliases := make([]string, 0, len(entry.values))
 	for _, val := range entry.values {
 		if now.After(val.expiry) {
@@ -46,7 +48,7 @@ func (c *DnsCache) GetAliasesForName(name string) []string {
 	return aliases
 }
 
-func (c *DnsCache) PruneCache() {
+func (c *Cache) Prune() {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -68,7 +70,7 @@ func (c *DnsCache) PruneCache() {
 	}
 }
 
-func (c *DnsCache) AddAlias(alias string, name string, expiry time.Time) {
+func (c *Cache) AddAlias(alias, name string, expiry time.Time) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -78,10 +80,7 @@ func (c *DnsCache) AddAlias(alias string, name string, expiry time.Time) {
 		c.reverseNameCache[name] = entry
 	}
 	// Add this direct alias
-	entry.values = append(entry.values, aliasEntry{
-		alias:  alias,
-		expiry: expiry,
-	})
+	entry.values = append(entry.values, aliasEntry{alias: alias, expiry: expiry})
 	// If alias itself has aliases, add all of those indirect aliases
 	if indirectAlias, ok := c.reverseNameCache[alias]; ok {
 		for _, val := range indirectAlias.values {

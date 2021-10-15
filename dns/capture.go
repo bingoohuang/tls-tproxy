@@ -15,21 +15,19 @@ import (
 
 type Capture struct {
 	activeQuestions map[uint16][]string
-	cache           *DnsCache
+	cache           *Cache
 	logger          *logrus.Logger
 }
 
 func NewCapture(logger *logrus.Logger) *Capture {
 	return &Capture{
 		activeQuestions: make(map[uint16][]string),
-		cache:           NewDnsCache(),
+		cache:           NewCache(),
 		logger:          logger,
 	}
 }
 
-func (c *Capture) GetCache() *DnsCache {
-	return c.cache
-}
+func (c *Capture) GetCache() *Cache { return c.cache }
 
 func (c *Capture) Run() (func(), error) {
 	ifaces, err := pcap.FindAllDevs()
@@ -71,8 +69,7 @@ func (c *Capture) Run() (func(), error) {
 				c.logger.Errorf("Got error retrieving packet: %v", err)
 				continue
 			}
-			err = c.handlePacket(localIps, packet)
-			if err != nil {
+			if err := c.handlePacket(localIps, packet); err != nil {
 				c.logger.Errorf("Got error handling packet: %v", err)
 				continue
 			}
@@ -92,16 +89,81 @@ func contains(haystack []string, needle string) bool {
 }
 
 func (c *Capture) handlePacket(localIps []net.IP, packet gopacket.Packet) error {
-
 	networkLayer := packet.NetworkLayer()
 	if networkLayer == nil {
 		return nil
 	}
 
-	var isIncoming bool
-	var isOutgoing bool
 	src := net.IP(networkLayer.NetworkFlow().Src().Raw())
 	dst := net.IP(networkLayer.NetworkFlow().Dst().Raw())
+
+	isIncoming, isOutgoing := parseDirection(localIps, src, dst)
+	if !isIncoming && !isOutgoing {
+		c.logger.Tracef("Saw packet with neither src nor dst matching a local IP: %s => %s", src.String(), dst.String())
+		return nil
+	}
+
+	if dnsLayer := packet.Layer(layers.LayerTypeDNS); dnsLayer != nil {
+		if dns, ok := dnsLayer.(*layers.DNS); ok {
+			if isOutgoing {
+				c.handlerOutgoingDnsPacket(dns)
+			} else if isIncoming {
+				c.handlerIncomingDnsPacket(dns)
+			}
+		}
+	}
+
+	return nil
+}
+
+func anyOf(typ layers.DNSType, targets ...layers.DNSType) bool {
+	for _, target := range targets {
+		if typ == target {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (c *Capture) handlerIncomingDnsPacket(dns *layers.DNS) {
+	validQuestions := c.activeQuestions[dns.ID][:]
+	for _, answer := range dns.Answers {
+		if answer.Class == layers.DNSClassIN && anyOf(answer.Type, layers.DNSTypeCNAME, layers.DNSTypeA, layers.DNSTypeAAAA) {
+			name := string(answer.Name)
+			if !contains(validQuestions, name) {
+				c.logger.Warnf("Saw unexpected DNS response for name=%s", name)
+				continue
+			}
+
+			expiry := time.Now().Add(time.Duration(answer.TTL) * time.Second)
+			var resolved string
+			if answer.Type == layers.DNSTypeCNAME {
+				resolved = string(answer.CNAME)
+				validQuestions = append(validQuestions, resolved)
+			} else if anyOf(answer.Type, layers.DNSTypeA, layers.DNSTypeAAAA) {
+				resolved = answer.IP.String()
+			}
+
+			c.logger.Tracef("Adding DNS resolution %s => %s (expiry=%s)", name, resolved, expiry)
+			c.cache.AddAlias(name, resolved, expiry)
+		}
+	}
+}
+
+func (c *Capture) handlerOutgoingDnsPacket(dns *layers.DNS) {
+	questions := make([]string, 0, len(dns.Questions))
+	for _, question := range dns.Questions {
+		if anyOf(question.Type, layers.DNSTypeA, layers.DNSTypeAAAA) && question.Class == layers.DNSClassIN {
+			name := string(question.Name)
+			logrus.Tracef("Saw query for name: %s", name)
+			questions = append(questions, name)
+		}
+	}
+	c.activeQuestions[dns.ID] = questions
+}
+
+func parseDirection(localIps []net.IP, src, dst net.IP) (isIncoming, isOutgoing bool) {
 	for _, ip := range localIps {
 		if bytes.Equal(ip, src) {
 			isOutgoing = true
@@ -112,49 +174,5 @@ func (c *Capture) handlePacket(localIps []net.IP, packet gopacket.Packet) error 
 			break
 		}
 	}
-	if !isIncoming && !isOutgoing {
-		c.logger.Tracef("Saw packet with neither src nor dst matching a local IP: %s => %s", src.String(), dst.String())
-		return nil
-	}
-
-	if dnsLayer := packet.Layer(layers.LayerTypeDNS); dnsLayer != nil {
-		if dns, ok := dnsLayer.(*layers.DNS); ok {
-			if isOutgoing {
-				questions := make([]string, 0, len(dns.Questions))
-				for _, question := range dns.Questions {
-					if (question.Type == layers.DNSTypeA || question.Type == layers.DNSTypeAAAA) && question.Class == layers.DNSClassIN {
-						name := string(question.Name)
-						logrus.Tracef("Saw query for name: %s", name)
-						questions = append(questions, name)
-					}
-				}
-				c.activeQuestions[dns.ID] = questions
-			} else if isIncoming {
-				validQuestions := c.activeQuestions[dns.ID][:]
-				for _, answer := range dns.Answers {
-					if answer.Class == layers.DNSClassIN && (answer.Type == layers.DNSTypeCNAME || answer.Type == layers.DNSTypeA || answer.Type == layers.DNSTypeAAAA) {
-						name := string(answer.Name)
-						if !contains(validQuestions, name) {
-							c.logger.Warnf("Saw unexpected DNS response for name=%s", name)
-							continue
-						}
-
-						expiry := time.Now().Add(time.Duration(answer.TTL) * time.Second)
-						var resolved string
-						if answer.Type == layers.DNSTypeCNAME {
-							resolved = string(answer.CNAME)
-							validQuestions = append(validQuestions, resolved)
-						} else if answer.Type == layers.DNSTypeA || answer.Type == layers.DNSTypeAAAA {
-							resolved = answer.IP.String()
-						}
-
-						c.logger.Tracef("Adding DNS resolution %s => %s (expiry=%s)", name, resolved, expiry)
-						c.cache.AddAlias(name, resolved, expiry)
-					}
-				}
-			}
-		}
-	}
-
-	return nil
+	return
 }

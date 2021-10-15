@@ -1,4 +1,4 @@
-package redirect
+package tlstproxy
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-func cleanup(logger *logrus.Logger, ipt *iptables.IPTables) error {
+func cleanupRedirect(logger *logrus.Logger, ipt *iptables.IPTables) error {
 	rules, err := ipt.List("nat", "OUTPUT")
 	if err != nil {
 		return fmt.Errorf("unable to list current iptable rules: %v", err)
@@ -33,20 +33,20 @@ func cleanup(logger *logrus.Logger, ipt *iptables.IPTables) error {
 	return nil
 }
 
-func Cleanup(logger *logrus.Logger) error {
+func CleanupRedirect(logger *logrus.Logger) error {
 	ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4)
 	if err != nil {
 		return fmt.Errorf("unable to initialize iptables: %v", err)
 	}
-	return cleanup(logger, ipt)
+	return cleanupRedirect(logger, ipt)
 }
 
-func Setup(logger *logrus.Logger, listenerPort int, portMap map[uint16]uint16) error {
+func SetupRedirect(logger *logrus.Logger, listenerPort int, portMap map[uint16]uint16) error {
 	ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4)
 	if err != nil {
 		return fmt.Errorf("unable to initialize iptables: %v", err)
 	}
-	err = cleanup(logger, ipt)
+	err = cleanupRedirect(logger, ipt)
 	if err != nil {
 		return err
 	}
